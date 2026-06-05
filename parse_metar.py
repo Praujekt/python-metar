@@ -6,7 +6,7 @@ from __future__ import print_function
 
 import sys
 import os
-from metar import Metar
+from metar import parser as Metar
 import string
 import getopt
 import profile

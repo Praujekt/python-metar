@@ -1,7 +1,7 @@
 """Test speed."""
 
 import pytest
-from metar.Datatypes import speed, UnitsError
+from metar.datatypes import speed, UnitsError
 
 
 def test_defaults():

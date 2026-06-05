@@ -81,7 +81,7 @@
 #
 from __future__ import print_function
 
-from metar import Metar
+from metar import parser as Metar
 
 # A sample METAR report
 code = (

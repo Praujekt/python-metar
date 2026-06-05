@@ -1,7 +1,7 @@
 """Test temperature."""
 
 import pytest
-from metar.Datatypes import temperature, UnitsError
+from metar.datatypes import temperature, UnitsError
 
 
 def test_defaults():

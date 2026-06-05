@@ -1,6 +1,6 @@
 """Test distance."""
 import pytest
-from metar.Datatypes import distance, UnitsError
+from metar.datatypes import distance, UnitsError
 
 
 def test_defaults():

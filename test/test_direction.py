@@ -1,6 +1,6 @@
 """Test direction."""
 import pytest
-from metar.Datatypes import direction
+from metar.datatypes import direction
 
 
 def test_usage():

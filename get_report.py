@@ -11,7 +11,7 @@ try:
     from urllib2 import urlopen
 except:
     from urllib.request import urlopen
-from metar import Metar
+from metar import parser as Metar
 
 BASE_URL = "https://tgftp.nws.noaa.gov/data/observations/metar/stations"
 

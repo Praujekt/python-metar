@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 """Python module to provide station information from the ICAO identifiers."""
 import os
-from metar.Datatypes import position
+from metar.datatypes import position
 
 
 class station:

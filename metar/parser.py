@@ -11,7 +11,7 @@ import warnings
 import logging
 
 from metar import __version__, __author__, __email__, __LICENSE__
-from metar.Datatypes import (
+from metar.datatypes import (
     temperature,
     pressure,
     speed,
@@ -193,6 +193,31 @@ SNOWDEPTH_RE = re.compile(r"""^4/(?P<snowdepth>\d\d\d)\s+""")
 ICE_ACCRETION_RE = re.compile(
     r"^I(?P<ice_accretion_hours>[136])(?P<ice_accretion_depth>\d\d\d)\s+"
 )
+
+# Sensor / station status flags (no payload).
+TSNO_RE = re.compile(r"^TSNO\s+")
+PWINO_RE = re.compile(r"^PWINO\s+")
+FZRANO_RE = re.compile(r"^FZRANO\s+")
+RVRNO_RE = re.compile(r"^RVRNO\s+")
+MAINT_RE = re.compile(r"^\$(?:\s+|$)")  # may sit at the very end of the report
+FROPA_RE = re.compile(r"^FROPA\s+")
+PRES_RR_RE = re.compile(r"^PRESRR\s+")
+PRES_FR_RE = re.compile(r"^PRESFR\s+")
+VIRGA_RE = re.compile(
+    r"^VIRGA(?:\s+(?P<dir>[NSEW][EW]?(?:-[NSEW][EW]?)*))?\s+"
+)
+
+# Variable ceiling: e.g. ``CIG 005V010`` -> ceiling varies 500-1000 ft.
+CIG_VAR_RE = re.compile(r"^CIG\s+(?P<low>\d{3})V(?P<high>\d{3})\s+")
+
+# Visibility-from-remarks values are statute miles, possibly fractional:
+# ``2``, ``1/2``, or ``1 1/2``. Reused by VIS_VAR_RE, SFC_VIS_RE, TWR_VIS_RE.
+_VIS_VALUE = r"\d+\s+\d+/\d+|\d+/\d+|\d+"
+VIS_VAR_RE = re.compile(
+    r"^VIS\s+(?P<low>" + _VIS_VALUE + r")V(?P<high>" + _VIS_VALUE + r")\s+"
+)
+SFC_VIS_RE = re.compile(r"^SFC\s+VIS\s+(?P<vis>" + _VIS_VALUE + r")\s+")
+TWR_VIS_RE = re.compile(r"^TWR\s+VIS\s+(?P<vis>" + _VIS_VALUE + r")\s+")
 
 
 # translation of weather location codes
@@ -410,6 +435,23 @@ class Metar(object):
         self.ice_accretion_1hr = None  # ice accretion over the past hour
         self.ice_accretion_3hr = None  # ice accretion over the past 3 hours
         self.ice_accretion_6hr = None  # ice accretion over the past 6 hours
+        # Sensor / station-status flags from remarks (Feature 4 additions).
+        self.tsno = False  # thunderstorm sensor not operating
+        self.pwino = False  # present-weather sensor not operating
+        self.fzrano = False  # freezing-rain sensor not operating
+        self.rvrno = False  # RVR data not available
+        self.maintenance_needed = False  # trailing `$` flag
+        self.fropa = False  # frontal passage observed
+        self.presrr = False  # pressure rising rapidly
+        self.presfr = False  # pressure falling rapidly
+        self.virga = False  # virga observed
+        self.virga_dir = None  # cardinal direction(s) the virga was seen, if any
+        self.ceiling_min = None  # variable-ceiling low value [distance]
+        self.ceiling_max = None  # variable-ceiling high value [distance]
+        self.vis_var_low = None  # variable visibility, lower bound [distance]
+        self.vis_var_high = None  # variable visibility, upper bound [distance]
+        self.surface_vis = None  # SFC VIS remark [distance]
+        self.tower_vis = None  # TWR VIS remark [distance]
         self._trend = False  # trend groups present (bool)
         self._trend_groups = []  # trend forecast groups
         self._remarks = []  # remarks (list of strings)
@@ -1027,6 +1069,83 @@ class Metar(object):
         value = precipitation(float(d["ice_accretion_depth"]) / 100.0, "IN")
         setattr(self, myattr, value)
 
+    def _handleTSNORemark(self, d):
+        """Thunderstorm sensor not operating."""
+        self.tsno = True
+        self._remarks.append("thunderstorm sensor not operating")
+
+    def _handlePWINORemark(self, d):
+        """Present-weather sensor not operating."""
+        self.pwino = True
+        self._remarks.append("present-weather sensor not operating")
+
+    def _handleFZRANORemark(self, d):
+        """Freezing-rain sensor not operating."""
+        self.fzrano = True
+        self._remarks.append("freezing-rain sensor not operating")
+
+    def _handleRVRNORemark(self, d):
+        """Runway visual range data not available."""
+        self.rvrno = True
+        self._remarks.append("RVR data not available")
+
+    def _handleMaintenanceRemark(self, d):
+        """A trailing ``$`` indicates the station needs maintenance."""
+        self.maintenance_needed = True
+        self._remarks.append("station needs maintenance")
+
+    def _handleFropaRemark(self, d):
+        """``FROPA`` — frontal passage observed."""
+        self.fropa = True
+        self._remarks.append("frontal passage observed")
+
+    def _handlePresRRRemark(self, d):
+        """``PRESRR`` — pressure rising rapidly."""
+        self.presrr = True
+        self._remarks.append("pressure rising rapidly")
+
+    def _handlePresFRRemark(self, d):
+        """``PRESFR`` — pressure falling rapidly."""
+        self.presfr = True
+        self._remarks.append("pressure falling rapidly")
+
+    def _handleVirgaRemark(self, d):
+        """``VIRGA`` — precipitation evaporating before reaching the ground."""
+        self.virga = True
+        if d.get("dir"):
+            self.virga_dir = d["dir"]
+            self._remarks.append("virga to the %s" % d["dir"])
+        else:
+            self._remarks.append("virga")
+
+    def _handleVariableCeilingRemark(self, d):
+        """``CIG <low>V<high>`` — ceiling varying between two values (ft x100)."""
+        low_ft = int(d["low"]) * 100
+        high_ft = int(d["high"]) * 100
+        self.ceiling_min = distance(low_ft, "FT")
+        self.ceiling_max = distance(high_ft, "FT")
+        self._remarks.append(
+            "variable ceiling %d to %d feet" % (low_ft, high_ft)
+        )
+
+    def _handleVariableVisibilityRemark(self, d):
+        """``VIS <low>V<high>`` — prevailing visibility variable (statute miles)."""
+        self.vis_var_low = distance(d["low"], "SM")
+        self.vis_var_high = distance(d["high"], "SM")
+        self._remarks.append(
+            "variable visibility %s to %s miles" % (d["low"], d["high"])
+        )
+
+    def _handleSurfaceVisibilityRemark(self, d):
+        """``SFC VIS <value>`` — visibility from the surface observation point."""
+        self.surface_vis = distance(d["vis"], "SM")
+        self._remarks.append("surface visibility %s miles" % d["vis"])
+
+    def _handleTowerVisibilityRemark(self, d):
+        """``TWR VIS <value>`` — visibility from the control tower."""
+        self.tower_vis = distance(d["vis"], "SM")
+        self._remarks.append("tower visibility %s miles" % d["vis"])
+
     def _unparsedRemark(self, d):
         """
         Handle otherwise unparseable remark groups.
@@ -1086,6 +1205,22 @@ class Metar(object):
         (TEMP_24HR_RE, _handleTemp24hrRemark),
         (SNOWDEPTH_RE, _handleSnowDepthRemark),
         (ICE_ACCRETION_RE, _handleIceAccretionRemark),
+        # Feature 4 additions — must precede UNPARSED_RE catch-all. Two-word
+        # remarks (``SFC VIS``, ``TWR VIS``) come before plain ``VIS`` so the
+        # general pattern doesn't shadow them.
+        (TSNO_RE, _handleTSNORemark),
+        (PWINO_RE, _handlePWINORemark),
+        (FZRANO_RE, _handleFZRANORemark),
+        (RVRNO_RE, _handleRVRNORemark),
+        (FROPA_RE, _handleFropaRemark),
+        (PRES_RR_RE, _handlePresRRRemark),
+        (PRES_FR_RE, _handlePresFRRemark),
+        (VIRGA_RE, _handleVirgaRemark),
+        (CIG_VAR_RE, _handleVariableCeilingRemark),
+        (SFC_VIS_RE, _handleSurfaceVisibilityRemark),
+        (TWR_VIS_RE, _handleTowerVisibilityRemark),
+        (VIS_VAR_RE, _handleVariableVisibilityRemark),
+        (MAINT_RE, _handleMaintenanceRemark),
         (UNPARSED_RE, _unparsedRemark),
     ]
 
@@ -1357,6 +1492,26 @@ class Metar(object):
                 text_list.append(label)
         return sep.join(text_list)
 
+    def ceiling(self, units: str = "FT"):
+        """Lowest BKN/OVC/VV layer. See :func:`metar.analysis.ceiling`."""
+        from metar import analysis
+        return analysis.ceiling(self, units=units)
+
+    def flight_category(self):
+        """FAA flight category. See :func:`metar.analysis.flight_category`."""
+        from metar import analysis
+        return analysis.flight_category(self)
+
+    def relative_humidity(self):
+        """RH in percent. See :func:`metar.analysis.relative_humidity`."""
+        from metar import analysis
+        return analysis.relative_humidity(self)
+
+    def to_plain_english(self, station_name: str = None) -> str:
+        """Human-readable summary. See :func:`metar.format.to_plain_english`."""
+        from metar import format as _format
+        return _format.to_plain_english(self, station_name=station_name)
+
     def trend(self):
         """
         Return the trend forecast groups
@@ -1368,3 +1523,8 @@ class Metar(object):
         Return the decoded remarks.
         """
         return sep.join(self._remarks)
+
+
+# Re-export so legacy callers using ``from metar import parser as Metar``
+# can still reach ``Metar.wind_components(...)`` — same name, new location.
+from metar.analysis import wind_components  # noqa: E402, F401

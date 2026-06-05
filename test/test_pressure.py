@@ -1,7 +1,7 @@
 """Test pressure."""
 
 import pytest
-from metar.Datatypes import pressure, UnitsError
+from metar.datatypes import pressure, UnitsError
 
 
 def test_defaults():

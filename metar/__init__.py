@@ -28,16 +28,13 @@ __author__ = "Tom Pollard"
 
 __email__ = "pollard@alum.mit.edu"
 
-__version__ = "0.0.0"  # Default
+__version__ = "0.0.0"  # Default — overridden below when installed.
 try:
-    # Exists after installation via scm write_to
-    from ._version import version as __version__
-except ImportError:
-    from importlib.metadata import version, PackageNotFoundError
-    try:
-        __version__ = version("metar")
-    except PackageNotFoundError:
-        pass
+    from importlib.metadata import PackageNotFoundError, version
+
+    __version__ = version("metar")
+except (ImportError, PackageNotFoundError):
+    pass
 
 __doc__ = """metar v%s (c) 2009, %s
 
@@ -74,3 +71,10 @@ POSSIBILITY OF SUCH DAMAGE.
 """
     % __author__
 )
+
+# Module aliases so historical CapWord imports still resolve. New code in
+# this fork should prefer the lowercase module names (`from metar import
+# parser`) or direct class imports (`from metar.parser import Metar`).
+from metar import datatypes, parser, station
+from metar import parser as Metar  # noqa: E402  (alias for the parser module)
+from metar import station as Station  # noqa: E402  (alias for the station module)

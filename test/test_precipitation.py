@@ -1,5 +1,5 @@
 """Test precipitation."""
-from metar.Datatypes import precipitation
+from metar.datatypes import precipitation
 
 
 def test_trace():

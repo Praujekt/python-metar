@@ -1,8 +1,8 @@
-"""Test metar/Station.py."""
-from metar import Station
+"""Test metar/station.py."""
+from metar import station
 
 
 def test_station():
     """Can we build a station object."""
-    st = Station.station("KDSM")
+    st = station.station("KDSM")
     assert st.id == "KDSM"

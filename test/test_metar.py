@@ -730,3 +730,379 @@ def test_present_weather_others():
     code = "VEIM 301200Z 16007KT 7000 NSW SCT018 31/27 Q1007 NOSIG"
     m = Metar.Metar(code, month=8, year=2023)
     assert m.present_weather() == 'no significant weather'
+
+
+# --------------------------------------------------------------------------
+# Flight category (VFR / MVFR / IFR / LIFR)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("code,expected", [
+    # 10 SM, CLR — clean VFR.
+    (
+        "METAR KOAK 050153Z 26008KT 10SM CLR 17/11 A2989 "
+        "RMK AO2 SLP121 T01720106",
+        "VFR",
+    ),
+    # 3 SM and 800 ft BKN — vis on the MVFR/IFR boundary but ceiling
+    # lands squarely in IFR; the worse value wins.
+    (
+        "METAR KSFO 051256Z 19012KT 3SM -RA BKN008 OVC015 13/11 A2981 "
+        "RMK AO2 SLP098",
+        "IFR",
+    ),
+    # 2 SM and 4000 ft BKN — vis is IFR even though ceiling is VFR.
+    (
+        "METAR KEWR 111851Z VRB03G19KT 2SM R04R/3000VP6000FT TSRA BR "
+        "FEW015 BKN040CB BKN065 OVC200 22/22 A2987 RMK AO2",
+        "IFR",
+    ),
+    # SKC and 10 SM — VFR.
+    (
+        "METAR KSJC 051755Z 00000KT 10SM SKC 22/08 A2990 "
+        "RMK AO2 SLP120",
+        "VFR",
+    ),
+    # 4 SM and 2500 ft BKN — both inputs land in MVFR.
+    (
+        "METAR KSFO 051556Z 28018G28KT 4SM HZ BKN025 17/09 A2997 "
+        "RMK AO2 SLP152",
+        "MVFR",
+    ),
+])
+def test_flight_category_reference(code, expected):
+    """Reference METARs classify per the FAA category thresholds."""
+    assert Metar.Metar(code).flight_category() == expected
+
+
+def test_flight_category_lifr_ceiling():
+    """A sub-500 ft ceiling forces LIFR regardless of visibility."""
+    code = (
+        "METAR KSFO 051256Z 19012KT 5SM BR OVC003 13/11 A2981 "
+        "RMK AO2 SLP098"
+    )
+    assert Metar.Metar(code).flight_category() == "LIFR"
+
+
+def test_flight_category_lifr_visibility():
+    """Sub-1 SM visibility forces LIFR regardless of ceiling."""
+    code = (
+        "METAR KSFO 051256Z 19012KT 1/2SM FG BKN040 13/11 A2981 "
+        "RMK AO2 SLP098"
+    )
+    assert Metar.Metar(code).flight_category() == "LIFR"
+
+
+def test_flight_category_indefinite_ceiling_vv():
+    """VV (vertical visibility) is treated as a zero-ft ceiling."""
+    code = (
+        "METAR KSFO 051256Z 19012KT 1/4SM FG VV002 13/11 A2981 "
+        "RMK AO2 SLP098"
+    )
+    m = Metar.Metar(code)
+    assert m.ceiling().value("FT") == 200
+    assert m.flight_category() == "LIFR"
+
+
+def test_flight_category_p6sm_treated_as_above_threshold():
+    """``P6SM`` (greater than 6 SM) with clear skies is VFR."""
+    code = (
+        "METAR KOAK 050153Z 26008KT P6SM CLR 17/11 A2989 "
+        "RMK AO2 SLP121"
+    )
+    m = Metar.Metar(code)
+    assert m.flight_category() == "VFR"
+
+
+def test_ceiling_ignores_few_sct():
+    """FEW and SCT layers do not constitute a ceiling."""
+    code = (
+        "METAR KOAK 050153Z 26008KT 10SM FEW020 SCT040 17/11 A2989 "
+        "RMK AO2 SLP121"
+    )
+    m = Metar.Metar(code)
+    assert m.ceiling() is None
+    assert m.flight_category() == "VFR"
+
+
+def test_ceiling_picks_lowest_bkn_ovc():
+    """Ceiling is the lowest BKN/OVC layer when multiple are present."""
+    code = (
+        "METAR KEWR 111851Z 18010KT 6SM FEW015 BKN040 OVC200 22/15 A2987 "
+        "RMK AO2"
+    )
+    m = Metar.Metar(code)
+    assert m.ceiling().value("FT") == 4000
+
+
+def test_flight_category_none_when_no_sky_or_vis():
+    """A METAR missing both sky and visibility returns ``None``."""
+    # Hand-built minimal report: no vis, no sky. Using strict=False
+    # because such a code wouldn't pass strict-mode parsing.
+    m = Metar.Metar(
+        "METAR KOAK 050153Z 26008KT 17/11 A2989", strict=False
+    )
+    assert m.flight_category() is None
+
+
+# --------------------------------------------------------------------------
+# Plain-English output
+# --------------------------------------------------------------------------
+
+KOAK_VFR = (
+    "METAR KOAK 050153Z 26008KT 10SM CLR 17/11 A2989 "
+    "RMK AO2 SLP121 T01720106"
+)
+
+
+def test_to_plain_english_header_includes_category_station_time():
+    """The header line carries category, station id, and obs time."""
+    out = Metar.Metar(KOAK_VFR).to_plain_english()
+    header = out.splitlines()[0]
+    assert "VFR" in header
+    assert "KOAK" in header
+    assert "01:53Z" in header
+
+
+def test_to_plain_english_station_name_optional():
+    """When ``station_name`` is supplied, it appears in the header."""
+    out = Metar.Metar(KOAK_VFR).to_plain_english(station_name="Oakland Int'l")
+    assert "KOAK — Oakland Int'l" in out.splitlines()[0]
+
+
+def test_to_plain_english_clear_vfr():
+    """A clean VFR report has a 'Clear skies, no ceiling.' line and no weather."""
+    out = Metar.Metar(KOAK_VFR).to_plain_english()
+    assert "Clear skies, no ceiling." in out
+    assert "Weather:" not in out
+    assert "Altimeter 29.89 inHg." in out
+    assert "Sea level pressure 1012.1 hPa." in out
+
+
+def test_to_plain_english_wind_west_at_8():
+    """West wind at 8 knots renders as 'Winds west at 8 knots.'."""
+    assert "Winds west at 8 knots." in Metar.Metar(KOAK_VFR).to_plain_english()
+
+
+def test_to_plain_english_calm_wind():
+    """``00000KT`` is reported as 'Winds calm.'."""
+    code = "METAR KSJC 051755Z 00000KT 10SM SKC 22/08 A2990 RMK AO2 SLP120"
+    assert "Winds calm." in Metar.Metar(code).to_plain_english()
+
+
+def test_to_plain_english_variable_wind_with_gust():
+    """Variable wind with a gust includes 'variable' and a gusting clause."""
+    code = (
+        "METAR KEWR 111851Z VRB03G19KT 2SM TSRA BR FEW015 BKN040CB BKN065 "
+        "OVC200 22/22 A2987 RMK AO2"
+    )
+    out = Metar.Metar(code).to_plain_english()
+    assert "Winds variable at 3 knots, gusting to 19 knots." in out
+
+
+def test_to_plain_english_ifr_includes_ceiling():
+    """An IFR report surfaces a ceiling phrase like 'Ceiling 800 feet.'."""
+    code = (
+        "METAR KSFO 051256Z 19012KT 3SM -RA BKN008 OVC015 13/11 A2981 "
+        "RMK AO2 SLP098"
+    )
+    out = Metar.Metar(code).to_plain_english()
+    assert "IFR" in out.splitlines()[0]
+    assert "Ceiling 800 feet." in out
+    assert "Weather: light rain." in out
+
+
+def test_to_plain_english_temp_and_humidity_units():
+    """Temp/dewpoint render in both °F and °C with a humidity percent."""
+    out = Metar.Metar(KOAK_VFR).to_plain_english()
+    # Don't pin the humidity number — formulas differ — but require all parts.
+    assert "Temperature 63°F (17°C)" in out
+    assert "dewpoint 51°F (11°C)" in out
+    assert "%." in out  # humidity present
+
+
+def test_to_plain_english_station_status_automated():
+    """``AO2`` triggers an 'automated (AO2)' status line."""
+    assert "Station is automated (AO2)." in (
+        Metar.Metar(KOAK_VFR).to_plain_english()
+    )
+
+
+def test_to_plain_english_station_status_sensor_and_maintenance():
+    """Sensor flags + a trailing ``$`` produce status lines."""
+    code = (
+        "METAR KOAK 050153Z 26008KT 10SM CLR 17/11 A2989 "
+        "RMK AO1 TSNO PWINO FZRANO RVRNO $"
+    )
+    out = Metar.Metar(code).to_plain_english()
+    assert "Station is automated (AO1)." in out
+    assert "TSNO" in out and "PWINO" in out
+    assert "FZRANO" in out and "RVRNO" in out
+    assert "Station needs maintenance ($)." in out
+
+
+def test_relative_humidity_known_value():
+    """RH at saturated dewpoint (T == Td) should be 100%."""
+    # Same temp and dewpoint -> saturation -> 100%.
+    code = "METAR KSFO 051256Z 19012KT 3SM -RA BKN008 22/22 A2981 RMK AO2"
+    rh = Metar.Metar(code).relative_humidity()
+    assert abs(rh - 100.0) < 0.01
+
+
+def test_relative_humidity_none_when_missing_dewpoint():
+    """Missing dewpoint yields ``None`` for relative humidity."""
+    m = Metar.Metar(
+        "METAR KOAK 050153Z 26008KT 10SM CLR A2989", strict=False
+    )
+    assert m.relative_humidity() is None
+
+
+# --------------------------------------------------------------------------
+# Crosswind / headwind components
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("wind_dir,runway,expected_x,expected_h", [
+    # Wind from same direction as the runway heading: pure headwind.
+    (360, 360, 0.0, 10.0),
+    (90,  90,  0.0, 10.0),
+    # Wind from opposite direction: pure tailwind (negative headwind).
+    (180, 360, 0.0, -10.0),
+    # Wind perpendicular: pure crosswind, no headwind component.
+    (90,  360, 10.0, 0.0),    # right crosswind
+    (270, 360, 10.0, 0.0),    # left crosswind (sign of magnitude is same)
+    # 45-degree quartering wind: equal split (sqrt(2)/2 * 10 ≈ 7.1).
+    (45,  360, 7.1, 7.1),
+    (315, 360, 7.1, 7.1),     # left-quartering headwind
+    (135, 360, 7.1, -7.1),    # right-quartering tailwind
+])
+def test_wind_components_geometry(wind_dir, runway, expected_x, expected_h):
+    """Standard angle cases produce the expected crosswind/headwind split."""
+    x, h = Metar.wind_components(wind_dir, 10, runway)
+    assert x == expected_x
+    assert h == expected_h
+
+
+def test_wind_components_calm_wind():
+    """Zero wind speed produces zero on both components."""
+    assert Metar.wind_components(360, 0, 90) == (0.0, 0.0)
+
+
+def test_wind_components_360_equals_0():
+    """``wind_dir=360`` should behave the same as ``wind_dir=0``."""
+    a = Metar.wind_components(360, 15, 90)
+    b = Metar.wind_components(0, 15, 90)
+    assert a == b
+
+
+def test_wind_components_crosswind_is_nonnegative():
+    """Crosswind magnitude must never come back negative."""
+    for wind_dir in range(0, 360, 15):
+        x, _ = Metar.wind_components(wind_dir, 20, 270)
+        assert x >= 0
+
+
+def test_wind_components_with_parsed_report():
+    """Smoke: feed a parsed METAR's wind into the helper."""
+    code = "METAR KSFO 051556Z 28018G28KT 4SM HZ BKN025 17/09 A2997 RMK AO2"
+    m = Metar.Metar(code)
+    # KSFO runway 28L heading is 281°. Wind from 280° at 18 kt — almost
+    # straight on, so a strong headwind and a negligible crosswind.
+    x, h = Metar.wind_components(
+        m.wind_dir.value(), m.wind_speed.value("KT"), 281
+    )
+    assert h > 17.0
+    assert x < 1.0
+
+
+# --------------------------------------------------------------------------
+# Expanded remark coverage (Feature 4)
+# --------------------------------------------------------------------------
+
+BASE = "METAR KOAK 050153Z 26008KT 10SM CLR 17/11 A2989 RMK AO2"
+
+
+@pytest.mark.parametrize("token,attr", [
+    ("TSNO", "tsno"),
+    ("PWINO", "pwino"),
+    ("FZRANO", "fzrano"),
+    ("RVRNO", "rvrno"),
+    ("FROPA", "fropa"),
+    ("PRESRR", "presrr"),
+    ("PRESFR", "presfr"),
+])
+def test_sensor_and_pressure_flags(token, attr):
+    """Each flag remark sets its parsed boolean attribute."""
+    m = Metar.Metar(BASE + " " + token)
+    assert getattr(m, attr) is True
+
+
+def test_maintenance_flag_at_end_of_report():
+    """A trailing ``$`` token sets ``maintenance_needed`` and parses cleanly."""
+    m = Metar.Metar(BASE + " $")
+    assert m.maintenance_needed is True
+
+
+def test_virga_without_direction():
+    """``VIRGA`` alone sets the boolean but leaves direction None."""
+    m = Metar.Metar(BASE + " VIRGA")
+    assert m.virga is True
+    assert m.virga_dir is None
+
+
+def test_virga_with_direction():
+    """``VIRGA SW`` records the cardinal direction."""
+    m = Metar.Metar(BASE + " VIRGA SW")
+    assert m.virga is True
+    assert m.virga_dir == "SW"
+
+
+def test_variable_ceiling_cig_remark():
+    """``CIG 005V010`` produces 500-1000 ft ceiling-min/max distances."""
+    m = Metar.Metar(
+        "METAR KOAK 050153Z 26008KT 3SM OVC008 17/11 A2989 RMK AO2 CIG 005V010"
+    )
+    assert m.ceiling_min.value("FT") == 500
+    assert m.ceiling_max.value("FT") == 1000
+
+
+def test_variable_visibility_vis_remark():
+    """``VIS 1V3`` records prevailing-visibility min/max in statute miles."""
+    m = Metar.Metar(
+        "METAR KOAK 050153Z 26008KT 2SM OVC008 17/11 A2989 RMK AO2 VIS 1V3"
+    )
+    assert m.vis_var_low.value("SM") == 1
+    assert m.vis_var_high.value("SM") == 3
+
+
+def test_variable_visibility_fractional():
+    """Fractional VIS values like ``1/2V2`` parse via the distance class."""
+    m = Metar.Metar(
+        "METAR KOAK 050153Z 26008KT 1/2SM OVC008 17/11 A2989 RMK AO2 VIS 1/2V2"
+    )
+    assert m.vis_var_low.value("SM") == 0.5
+    assert m.vis_var_high.value("SM") == 2
+
+
+def test_surface_visibility_remark():
+    """``SFC VIS 2`` populates ``surface_vis``."""
+    m = Metar.Metar(
+        "METAR KOAK 050153Z 26008KT 2SM OVC008 17/11 A2989 RMK AO2 SFC VIS 2"
+    )
+    assert m.surface_vis.value("SM") == 2
+
+
+def test_tower_visibility_remark():
+    """``TWR VIS 3`` populates ``tower_vis``."""
+    m = Metar.Metar(
+        "METAR KOAK 050153Z 26008KT 2SM OVC008 17/11 A2989 RMK AO2 TWR VIS 3"
+    )
+    assert m.tower_vis.value("SM") == 3
+
+
+def test_station_status_sentence_now_uses_parsed_attrs():
+    """The plain-English status line still works after the refactor."""
+    code = BASE + " TSNO PWINO FZRANO RVRNO $"
+    out = Metar.Metar(code).to_plain_english()
+    assert "Station is automated (AO2)." in out
+    assert "TSNO" in out and "PWINO" in out
+    assert "FZRANO" in out and "RVRNO" in out
+    assert "Station needs maintenance ($)." in out
